@@ -638,6 +638,8 @@ sub oauth2_globus_runmode {
   
   #$self->logger->info('code = '.$code);
 
+  my $data_for_postrun_href = {};
+
   my $local_oauth2_client_id     = $OAUTH2_CLIENT_ID->{$ENV{DOCUMENT_ROOT}};
   my $local_oauth2_client_secret = $OAUTH2_CLIENT_SECRET->{$ENV{DOCUMENT_ROOT}};
   my $local_oauth2_site          = $OAUTH2_SITE->{$ENV{DOCUMENT_ROOT}};
@@ -661,21 +663,11 @@ sub oauth2_globus_runmode {
   );
 
   $ua->prepare_request($req);
-  #$self->logger->info('req');
-  #$self->logger->info($req->as_string);
-
   my $resp = $ua->request($req);
-  #$self->logger->info('resp');
-  #$self->logger->info($resp->as_string);
-  #$self->logger->info('resp content');
-  #$self->logger->info($resp->content);
   
   my $token_resp = eval { decode_json($resp->decoded_content); };
   my $token      = $token_resp->{'access_token'};
   
-  #$self->logger->info('token');
-  #$self->logger->info($token);
-
   my $oauth2_client = Net::OAuth2::Client->new(
     $local_oauth2_client_id,
     $local_oauth2_client_secret,
@@ -690,8 +682,8 @@ sub oauth2_globus_runmode {
     access_token => $token
   );
 
+  # {"email": "tprather@umn.edu", "preferred_username": "tprather@umn.edu", "sub": "123259f1-f11a-4427-a347-f631f2b8ce9e", "name": "Tom Prather"}
   my $user_info_resp = $access_token->get('https://auth.globus.org/v2/oauth2/userinfo');
-  #{"email": "tprather@umn.edu", "preferred_username": "tprather@umn.edu", "sub": "123259f1-f11a-4427-a347-f631f2b8ce9e", "name": "Tom Prather"}
   $self->logger->info('user_info_resp = '.$user_info_resp->as_string);
 
   if (not $user_info_resp->is_success) {
@@ -719,16 +711,54 @@ sub oauth2_globus_runmode {
     return $data_for_postrun_href;
   }
 
-  my $user_email = $user_info_href->{'email'};
-  my $name       = $user_info_href->{'name' };
-  my $dbh_write  = connect_kdb_write();
-  my $user_id    = read_cell_value($dbh_write,'systemuser','UserId','UserName',$user_email);
+  my $user_email    = $user_info_href->{'email'};
+  my $user_fullname = $user_info_href->{'name' };
+
+  my $dbh        = connect_kdb_write();
+  my $user_id    = read_cell_value($dbh,'auth_users','UserId','UserName',$user_email);
+
   if (length("$user_id") == 0) {
   	# TODO: Create a user account for a user whose KDDArT username is $user_email.
   	# (initially, users are not part of a primary group and, thus, have no system use)
+  	$self->logger->info("Adding user '".$user_email."' . . .");
+  	my ($err,$msg) = execute_sql($dbh,"INSERT INTO auth_users SET UserName=?, FullName=?, Email=?",[$user_email,$user_fullname,$user_email]);
+  	if ($err) {
+  	  $self->logger->info("Error adding user: ".$msg);
+  	}
+  	$user_id = read_cell_value($dbh,'auth_users','UserId','UserName',$user_email);
   }
   
-  # TODO: Create session info a la oauth2google below.
+  # Temporary code to create/test initial groups for tprather.
+  if ($user_email eq 'tprather@umn.edu') {
+    execute_sql($dbh,"INSERT IGNORE INTO auth_groups          SET GroupName='Test Group 1'");
+    execute_sql($dbh,"INSERT IGNORE INTO auth_group_users     SET GroupId=1000000001,UserId=1");
+    execute_sql($dbh,"INSERT IGNORE INTO auth_datasets        SET DatasetName='Test Dataset 1'");
+    execute_sql($dbh,"INSERT IGNORE INTO auth_dataset_userset SET DatasetId=1,Capability='READ',UserGroupId=1000000001");
+    execute_sql($dbh,"INSERT IGNORE INTO auth_dataset_userset SET DatasetId=1,Capability='EDIT',UserGroupId=1");
+  }
+  
+  $self->logger->info("Looking up user's dataset capabilities . . .");
+  my $sql  = "SELECT d.DatasetId,d.DatasetName,du.Capability,g.GroupName,u.FullName";
+     $sql .= " FROM       auth_users           u";
+     $sql .= " INNER JOIN auth_group_users     gu ON (gu.UserId      =   u.UserId            )";
+     $sql .= " INNER JOIN auth_dataset_userset du ON (du.UserGroupId IN (u.UserId,gu.GroupId))";
+     $sql .= " LEFT  JOIN auth_groups          g  ON (g.GroupId      =   du.UserGroupId      )";
+     $sql .= " INNER JOIN auth_datasets        d  ON (d.DatasetId    =   du.DatasetId        )";
+     $sql .= " WHERE (u.UserId=?)";
+  my $sth = $dbh->prepare($sql);
+  $sth->execute($user_id);
+  while (my $row = $sth->fetchrow_hashref() ) {
+    my $dataset_id    = $row->{'DatasetId'};
+    my $dataset_name  = $row->{'DatasetName'};
+    my $capability    = $row->{'Capability'};
+    my $group_name    = $row->{'GroupName'};
+    my $user_fullname = $row->{'FullName'};
+    $self->logger->info("Dataset Capability = ".$dataset_name." / ".$capability." (".$group_name.",".$user_fullname.")");
+  }
+  $sth->finish();
+
+  $self->logger->info("Would finish creating user session . . .");
+  # TODO: Finish create session info a la oauth2google below.
   	  	
 
   my $r = {};

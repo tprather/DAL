@@ -1,0 +1,316 @@
+
+#Openstack AppdevCentOS-20101001 image as m1.large with
+Openstack CentOS 7 Generic image as m1.large with tprather_2 keypair
+
+  default_plus_unmanaged
+  webserver
+  
+  and at least for now
+    mongodb
+    mysql
+    postgresql
+    
+Login
+
+  sudo su
+  yum -y install epel-release
+  yum -y install ansible git
+  
+  cd /root
+  git clone https://github.com/tprather/DAL KDDArT-DAL-v2.3.2
+  cd KDDArT-DAL-v2.3.2/other/deploy_with_ansible/centos7
+  
+  vi kddart_dal_v2_3_2_server_deployment_centos7_from_github.yml
+  
+    - change "hosts: kddartserver" to
+         hosts: localhost
+         connection: local
+    - comment out git install and execution
+    
+  
+  vi kddart_dal_v2_3_2_server_deployment_centos7.yml
+  
+    - comment out the "Disable firewall" and "Stop firewall" steps.
+    
+  export PATH=$PATH:/usr/local/bin
+  ansible-playbook kddart_dal_v2_3_2_server_deployment_centos7_from_github.yml
+  
+  ---------------------
+  Add SSL
+  
+  
+  ---------------------
+  Install Globus per https://wiki.msi.umn.edu/display/HPC/How+to+setup+and+use+a+Globus+endpoint
+  
+  - couldn't figure out how to get access to our puppet master for modules/firewall/???/globus.pp, so
+    
+	iptables -A INPUT  -p tcp --dport  2811        -s 184.73.189.163 -j ACCEPT
+	iptables -A INPUT  -p tcp --dport  2811        -s 174.129.226.69 -j ACCEPT
+	iptables -A INPUT  -p tcp --dport  50000:51000                   -j ACCEPT
+	iptables -A OUTPUT -p tcp --dport  50000:51000                   -j ACCEPT
+	iptables -A OUTPUT -p tcp --dport  2223        -d 174.129.226.69 -j ACCEPT
+	iptables -A OUTPUT -p tcp --dport  443         -d 174.129.226.69 -j ACCEPT
+	iptables -A OUTPUT -p tcp --dport  443         -d nexus.api.globusonline.org -j ACCEPT
+	iptables -A OUTPUT -p tcp --dport  80          -d 192.2.186.47   -j ACCEPT
+	iptables -A INPUT  -p tcp --dport  7512        -s 174.129.226.69 -j ACCEPT
+	iptables -A INPUT  -p tcp --dport  443                           -j ACCEPT
+	iptables -A INPUT  -p tcp --dport  8443                          -j ACCEPT
+	
+  
+  mv  /etc/globus-connect-server.conf /etc/globus-connect-server.conf.1
+  scp tprather@globusmsic1:/etc/globus-connect-server.conf /etc/globus-connect-server.conf
+  globus-connect-server-setup
+  
+  
+  vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+  Add Authorization tables.
+
+  DROP TABLE IF EXISTS auth_users;
+  CREATE TABLE auth_users (
+    UserId                    INT          PRIMARY KEY AUTO_INCREMENT,
+    UserName                  VARCHAR(255) UNIQUE  KEY,
+    FullName                  VARCHAR(63),
+    Email                     VARCHAR(255)
+  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
+
+  DROP TABLE IF EXISTS auth_groups;  
+  CREATE TABLE auth_groups (
+    GroupId                   INT          PRIMARY KEY AUTO_INCREMENT,
+    GroupName                 VARCHAR(255) UNIQUE  KEY
+  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci' AUTO_INCREMENT=1000000001;
+  
+  
+  DROP TABLE IF EXISTS auth_datasets;
+  CREATE TABLE auth_datasets (
+    DatasetId                 INT          PRIMARY KEY AUTO_INCREMENT,
+    DatasetName               VARCHAR(255) UNIQUE  KEY
+  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
+  
+  DROP TABLE IF EXISTS auth_group_users;
+  CREATE TABLE auth_group_users (
+    GroupId                   INT,
+    UserId                    INT,
+    UNIQUE INDEX idx_GroupId_UserId (GroupId,UserId),
+           INDEX idx_GroupId        (GroupId),
+           INDEX idx_UserId         (UserId)
+  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
+  
+  DROP TABLE IF EXISTS auth_dataset_userset;
+  CREATE TABLE auth_dataset_userset (
+    DatasetId                 INT,
+    Capability                VARCHAR(15),
+    UserGroupId               INT,
+    UNIQUE INDEX idx_DatasetId_Capability (DatasetId,Capability),
+           INDEX idx_DatasetId            (DatasetId),
+           INDEX idx_UserGroupId          (UserGroupId)
+  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
+  
+
+
+  SELECT d.DatasetId,d.DatasetName,du.Capability,g.GroupName,u.FullName
+   FROM       auth_users           u
+   INNER JOIN auth_group_users     gu ON (gu.UserId      =  u.UserId)
+   INNER JOIN auth_dataset_userset du ON (du.UserGroupId IN (u.UserId,gu.GroupId))
+   LEFT  JOIN auth_groups          g  ON (g.GroupId      =  du.UserGroupId)
+   INNER JOIN auth_datasets        d  ON (d.DatasetId    =  du.DatasetId)
+   WHERE (u.UserId=1);
+
+
+
+
+  vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+    
+  cd /root
+  git clone https://github.com/tprather/libJavascript-DAL
+  find libJavascript-DAL -type d -exec chmod 757 {} \;
+  find libJavascript-DAL -type f -exec chmod 644 {} \;
+  
+  cd /etc/httpd/conf.d
+  cp http-kddart.example.com.conf http-kddtfp.msi.umn.edu.conf
+  
+  vi http-kddtfp.msi.umn.edu.conf
+  
+		NameVirtualHost 10.32.16.168:80
+		
+		
+		<VirtualHost kddtfp.msi.umn.edu:80>
+		
+		        #  General setup for the virtual host
+		        DocumentRoot "/var/www/vhosts/kddtfp.msi.umn.edu"
+		        ServerName kddtfp.msi.umn.edu:80
+		        ServerAdmin webmaster@example.com
+		        ErrorLog /var/log/httpd/kddtfp.msi.umn.edu.error_log
+		        TransferLog /var/log/httpd/kddtfp.msi.umn.edu.access_log
+		
+		        SetEnvIf Origin ^(https?://.+\.msi.umn.edu(?::\d{1,5})?)$ CORS_ALLOW_ORIGIN=$1
+		
+		        Header set Access-Control-Allow-Origin %{CORS_ALLOW_ORIGIN}e env=CORS_ALLOW_ORIGIN
+		        Header set Access-Control-Allow-Credentials true
+		        Header merge Vary "Origin"
+		
+		        <Directory "/var/www/vhosts/kddtfp.msi.umn.edu">
+		
+		                #
+		                # Possible values for the Options directive are "None", "All",
+		                # or any combination of:
+		                #   Indexes Includes FollowSymLinks SymLinksifOwnerMatch ExecCGI MultiViews
+		                #
+		                # Note that "MultiViews" must be named *explicitly* --- "Options All"
+		                # doesn't give it to you.
+		                #
+		                # The Options directive is both complicated and important.  Please see
+		                # http://httpd.apache.org/docs-2.0/mod/core.html#options
+		                # for more information.
+		                #
+		                Options FollowSymLinks
+		
+		                #
+		                # AllowOverride controls what directives may be placed in .htaccess files.
+		                # It can be "All", "None", or any combination of the keywords:
+		                #   Options FileInfo AuthConfig Limit
+		                #
+		                AllowOverride All
+		
+		                # For Apache 2.4
+		                Require all granted
+		
+		        </Directory>
+		
+		</VirtualHost>
+  
+  ln -s /root/libJavascript-DAL /var/www/vhosts/kddtfp.msi.umn.edu
+  
+  vi /etc/hosts
+  
+    - and add kddtfp.msi.umn.edu at VM ip address
+    
+    
+  /usr/local/bin/cpanm LWP::Protocol::https
+  /usr/local/bin/cpanm URI::Escape;
+
+
+
+
+  ??? curl -L http://cpanmin.us | perl - --sudo Dancer2
+  
+  
+  vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+  
+  OAuth client ID: 495264354820-7a4da27d58t9o1fa1auhck76j69nqugf.apps.googleusercontent.com
+  OAuth client secret: y3XYV47612LilaGobcBVvAXB
+  
+  
+  vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
+    
+  
+  
+  #yum update
+  rpm -ivh http://yum.postgresql.org/9.5/redhat/rhel-7-x86_64/pgdg-centos95-9.5-2.noarch.rpm  
+  
+  rpm -qa | grep 'pgdg-centos95-9.5-2.noarch'
+  
+  
+  yum install postgresql-server postgresql-contrib postgresql-devel postgresql-libs postgresql
+  service postgresql initdb
+  service postgresql start
+  sudo -u postgres psql
+    ALTER USER postgres PASSWORD ':s9Z*nsy';
+    \q
+    
+  rpm -ivh http://dev.mysql.com/get/mysql57-community-release-el7-8.noarch.rpm
+  yum install mysql-server mysql-devel mysql
+  service mysqld start
+  /usr/bin/mysql_secure_installation  (Mn6_JJ=s)
+  
+  yum install postgis
+
+
+  yum install make gcc bison openssl openssl-devel libxml2 libxml2-devel httpd httpd-devel \
+      perl perl-DBI perl-DBD-mysql perl-DBD-Pg perl-DBD-SQLite \
+      shapelib shapelib-devel \
+      perl-ExtUtils-Manifest perl-ExtUtils-MakeMaker perl-Data-Dumper perl-Digest-SHA \
+      perl-Digest-MD5 perl-Compress-Raw-Bzip2 perl-Compress-Raw-Zlib perl-DateTime-Format-MySQL \
+      perl-DateTime-Format-Pg perl-CGI-Application perl-Authen-Simple perl-Apache-Htpasswd \
+      perl-UNIVERSAL-require perl-String-Random perl-Config-Simple perl-Text-CSV perl-Text-CSV_XS \
+      perl-JSON-XS perl-XML-DOM perl-Env perl-CGI-Session perl-XML-SAX perl-Test-TCP perl-String-Escape \
+      libselinux-python
+  
+  yum install mod_perl mod_perl-devel
+  
+  curl -L https://cpanmin.us | perl - App::cpanminus
+  
+  cpanm Geo::Coder::Google Text::CSV::Simple Email::Valid Apache2_4::AuthCookie Color::Calc \
+        CGI::Session CGI::Application::Dispatch CGI::Application::Plugin::AutoRunmode \
+        CGI::Application::Plugin::ActionDispatch CGI::Application::Plugin::DevPopup \
+        CGI::Application::Plugin::Session CGI::Application::Plugin::Config::Simple \
+        Log::Log4perl Net::OAuth2::Client Net::OAuth2::AccessToken Net::SSLeay IO::Socket::SSL \
+        Mozilla::CA Tree::R Hash::Merge XML::Parser::PerlSAX File::Lockfile JSON::Validator \
+        XML::XSLT XML::Writer XML::Simple
+
+  yum install perl-Class-Loader perl-Math-Pari perl-Crypt-Random
+
+  cd /tmp
+  curl -L http://www.cpan.org/authors/id/A/AJ/AJOLMA/Geo-Shapelib-0.21.tar.gz | tar zx
+  cd /tmp/Geo-Shapelib-0.21
+  perl -w Makefile.PL --shapelib=/usr/lib64/libshp.so.1
+  sed -i "s|-I/usr/local/include|-I/usr/local/include -I/usr/include/libshp|" Makefile
+  make install
+  rm -rf /tmp/Geo-Shapelib-0.21
+  
+  cd /tmp
+  curl -L http://www.cpan.org/authors/id/S/SI/SILASMONK/CGI-Application-Plugin-Authentication-0.20.tar.gz | tar zx
+  cd /tmp/CGI-Application-Plugin-Authentication-0.20
+  perl -w Makefile.PL
+  make install
+  rm -rf /tmp/CGI-Application-Plugin-Authentication-0.20
+  
+  cd /tmp
+  curl -L http://search.cpan.org/CPAN/authors/id/T/TJ/TJMATHER/XML-Checker-0.13.tar.gz | tar zx
+  cd /tmp/XML-Checker-0.13
+  perl -w Makefile.PL
+  make
+  make install
+  rm -rf /tmp/XML-Checker-0.13
+
+  #yum install http://dev.monetdb.org/downloads/epel/MonetDB-release-epel-1.1-1.monetdb.noarch.rpm
+  yum install epel-release
+  
+  yum install MonetDB-SQL-server5 MonetDB-client MonetDB-client-perl
+  monetdbd create /var/lib/monetdb/dbfarm
+  monetdbd start /var/lib/monetdb/dbfarm
+  
+- get the DAL source:
+    
+  yum install git
+  cd /root
+  git clone https://github.com/tprather/DAL
+  cd DAL
+  
+- customize install for DAL
+
+  cp other/kddart.mal /usr/lib64/monetdb5/autoload/99_kddart.mal
+
+  mv /var/lib/pgsql/data/pg_hba.conf /var/lib/pgsql/data/pg_hba_conf`date +'%Y%m%d'`;
+  echo 'local   all             all                                   trust'    > /var/lib/pgsql/data/pg_hba.conf;
+  echo 'host    all             all             127.0.0.1/32          trust'    >> /var/lib/pgsql/data/pg_hba.conf;
+  echo 'host    all             all             ::1/128               trust'    >> /var/lib/pgsql/data/pg_hba.conf;
+  echo 'host    kddart_gis_enviro_v2_3_2 all    127.0.0.1/24          password' >> /var/lib/pgsql/data/pg_hba.conf;
+  echo 'host    kddart_gis_enviro_v2_3_2 all    127.0.0.1/24          password' >> /var/lib/pgsql/data/pg_hba.conf;
+  
+  service postgresql restart
+
+  echo 'CREATE AGGREGATE group_concat(t text) RETURNS text external name "kddart"."group_concat";' \
+    >> other/db_files/kddart_marker_dal_v2_3_2.sql
+    
+  sed -i "s|MONET_PASS='monetdb'|MONET_PASS='monetdb'|g"       other/create_dbs.sh
+  sed -i "s|DB_PASS='yourSecurePassword'|DB_PASS=':s9Z*nsy'|g" other/create_dbs.sh
+    
+  if [ ! -e /root/.my.cnf ]; then
+    echo "[client]" > /root/.my.cnf
+    echo "user=root" >> /root/.my.cnf
+    echo "password=`grep 'temporary password' /var/log/mysqld.log | gawk '{print $NF}'`" >> /root/.my.cnf
+    echo "ALTER USER 'root'@'localhost' IDENTIFIED BY 'Mn6_JJ=s'" | mysql -u root mysql --connect-expired-password
+  fi
+    
+
+    
