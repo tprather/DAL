@@ -994,6 +994,9 @@ CGI::Application::Dispatch->dispatch(
     'update/userpreference'                             => { app => 'KDDArT::DAL::System',
                                                              rm  => 'update_user_preference' },
 
+	'oauth2globus'                                      => { app => 'KDDArT::DAL::Authentication',
+	                                                         rm  => 'oauth2_globus' },
+
     'oauth2google'                                      => { app => 'KDDArT::DAL::Authentication',
                                                              rm  => 'oauth2_google' },
 

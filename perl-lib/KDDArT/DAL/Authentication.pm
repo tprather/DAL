@@ -44,6 +44,7 @@ use Mozilla::CA;
 use LWP::UserAgent;
 use HTTP::Request::Common qw(POST GET);
 use JSON qw(decode_json);
+use URI::Escape;
 
 BEGIN {
 
@@ -78,6 +79,7 @@ sub setup {
     'switch_to_group'           => 'switch_to_group_runmode',
     'get_login_status'          => 'get_login_status_runmode',
     'switch_extra_data'         => 'switch_extra_data_runmode',
+    'oauth2_globus'             => 'oauth2_globus_runmode',
     'oauth2_google'             => 'oauth2_google_runmode',
       );
 
@@ -627,6 +629,113 @@ sub switch_extra_data_runmode {
   $data_for_postrun_href->{'ExtraData'} = 0;
 
   return $data_for_postrun_href;
+}
+
+sub oauth2_globus_runmode {
+  my $self  = shift;
+  my $query = $self->query();
+  my $code  = $query->param('code');
+  
+  #$self->logger->info('code = '.$code);
+
+  my $local_oauth2_client_id     = $OAUTH2_CLIENT_ID->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_client_secret = $OAUTH2_CLIENT_SECRET->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_site          = $OAUTH2_SITE->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_auth_path     = $OAUTH2_AUTHORIZE_PATH->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_scope         = $OAUTH2_SCOPE->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_acc_token_url = $OAUTH2_ACCESS_TOKEN_URL->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_redirect_url  = 'https://10.32.16.168:40112/dal/oauth2globus';
+
+  my $ua = LWP::UserAgent->new;
+  $ua->{'logger'} = $self->logger;
+  #$ua->add_handler("request_send",  sub { my ($r,$ua,$h) = @_; $ua->{'logger'}->error($r->as_string); return });
+  #$ua->add_handler("response_done", sub { my ($r,$ua,$h) = @_; $ua->{'logger'}->error($r->as_string); return });
+
+  my $req = HTTP::Request::Common::POST(
+    $local_oauth2_acc_token_url.'?'.
+    'grant_type='    .uri_escape('authorization_code').'&'.
+    'code='          .uri_escape($code).'&'.
+    'redirect_uri='  .uri_escape($local_oauth2_redirect_url).'&'.
+    'client_id='     .uri_escape($local_oauth2_client_id).'&'.
+    'client_secret=' .uri_escape($local_oauth2_client_secret)
+  );
+
+  $ua->prepare_request($req);
+  #$self->logger->info('req');
+  #$self->logger->info($req->as_string);
+
+  my $resp = $ua->request($req);
+  #$self->logger->info('resp');
+  #$self->logger->info($resp->as_string);
+  #$self->logger->info('resp content');
+  #$self->logger->info($resp->content);
+  
+  my $token_resp = eval { decode_json($resp->decoded_content); };
+  my $token      = $token_resp->{'access_token'};
+  
+  #$self->logger->info('token');
+  #$self->logger->info($token);
+
+  my $oauth2_client = Net::OAuth2::Client->new(
+    $local_oauth2_client_id,
+    $local_oauth2_client_secret,
+    site             => $local_oauth2_site,
+    authorize_path   => $local_oauth2_auth_path,
+    scope            => $local_oauth2_scope,
+    access_token_url => $local_oauth2_acc_token_url
+  )->web_server(redirect_uri => $local_oauth2_redirect_url);
+
+  my $access_token = Net::OAuth2::AccessToken->new(
+    client       => $oauth2_client,
+    access_token => $token
+  );
+
+  my $user_info_resp = $access_token->get('https://auth.globus.org/v2/oauth2/userinfo');
+  #{"email": "tprather@umn.edu", "preferred_username": "tprather@umn.edu", "sub": "123259f1-f11a-4427-a347-f631f2b8ce9e", "name": "Tom Prather"}
+  $self->logger->info('user_info_resp = '.$user_info_resp->as_string);
+
+  if (not $user_info_resp->is_success) {
+    $self->logger->debug("Cannot get OAuth2 user info content");
+    my $err_msg = "Unexpected Error.";
+    $data_for_postrun_href->{'Error'} = 1;
+    $data_for_postrun_href->{'Data'}  = {'Error' => [{'Message' => $err_msg}]};
+    return $data_for_postrun_href;
+  }
+  
+  my $user_info_href = eval { decode_json($user_info_resp->decoded_content) };
+  if (not $user_info_href) {
+    $self->logger->debug("Cannot decode OAuth2 user info content");
+    my $err_msg = "Unexpected Error.";
+    $data_for_postrun_href->{'Error'} = 1;
+    $data_for_postrun_href->{'Data'}  = {'Error' => [{'Message' => $err_msg}]};
+    return $data_for_postrun_href;
+  }
+  
+  if (not $user_info_href->{'email'}) {
+    $self->logger->debug("No email in user info");
+    my $err_msg = "Unexpected Error.";
+    $data_for_postrun_href->{'Error'} = 1;
+    $data_for_postrun_href->{'Data'}  = {'Error' => [{'Message' => $err_msg}]};
+    return $data_for_postrun_href;
+  }
+
+  my $user_email = $user_info_href->{'email'};
+  my $name       = $user_info_href->{'name' };
+  my $dbh_write  = connect_kdb_write();
+  my $user_id    = read_cell_value($dbh_write,'systemuser','UserId','UserName',$user_email);
+  if (length("$user_id") == 0) {
+  	# TODO: Create a user account for a user whose KDDArT username is $user_email.
+  	# (initially, users are not part of a primary group and, thus, have no system use)
+  }
+  
+  # TODO: Create session info a la oauth2google below.
+  	  	
+
+  my $r = {};
+  $r->{'Error'     } = 0;
+  $r->{'Data'      } = {'Info' => [{'Code' => $code}]};
+  $r->{'Extra_Data'} = 0;
+  return $r;
 }
 
 sub oauth2_google_runmode {
