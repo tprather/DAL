@@ -46,7 +46,7 @@ use HTTP::Request::Common qw(POST GET);
 use JSON qw(decode_json);
 
 use URI::Escape;
-use Storable qw(dclone);
+use feature qw(switch);
 
 BEGIN {
 
@@ -732,7 +732,7 @@ sub oauth2_globus_runmode {
 
   if (length("$user_id") == 0) {
   	# TODO: Create a user account for a user whose KDDArT username is $user_email.
-  	# (initially, users are not part of a primary group and, thus, have no system use)
+  	# (initially, users are not part of a primary group and, thus, have no system access)
   	$self->logger->info("Adding user '".$user_email."' . . .");
   	my ($err,$msg) = execute_sql($dbh,"INSERT INTO auth_users SET UserName=?, FullName=?, Email=?",[$user_email,$user_fullname,$user_email]);
   	if ($err) {
@@ -741,7 +741,7 @@ sub oauth2_globus_runmode {
   	$user_id = read_cell_value($dbh,'auth_users','UserId','UserName',$user_email);
   }
   
-  # Load MAX dataset capabilities.
+  #-----Load MAX dataset capabilities.---------------------------------------------------------------------------------
   my $dataset_capabilities = {};
   {
 	  $self->logger->info(sprintf("Looking up %s's dataset capabilities . . .",$user_email));
@@ -770,60 +770,95 @@ sub oauth2_globus_runmode {
 	  $sth->finish();
   }
 
-  # Note dataset components.
+  #-----Note dataset component capabilities.---------------------------------------------------------------------------
   my @data_capabilities = ();
   {
-      foreach my $dataSetId (keys $dataset_capabilities) {
-	    my $sth = $dbh->prepare('SELECT * FROM auth_datas WHERE DataId='.$dataSetId.' OR DatagroupId='.$dataSetId.'');
-	    $sth->execute();
-	    while (my $row = $sth->fetchrow_hashref()) {
-	      push(@data_capabilities,{
-	        Capability      => $dataset_capabilities->{$dataSetId}->{'Capability'     },
-	        CapabilityValue => $dataset_capabilities->{$dataSetId}->{'CapabilityValue'},
-	        Repository      => $row->{'Repository'    },
-	        DatabaseName    => $row->{'DatabaseName'  },
-	        TableName       => $row->{'TableName'     },
-	        RowWhereClause  => $row->{'RowWhereClause'},
-	        ColumnList      => $row->{'ColumnList'    }
-	      });
-	    }
-	    $sth->finish();
-	  }
+    foreach my $dataSetId (keys $dataset_capabilities) {
+  	  my $sth = $dbh->prepare('SELECT * FROM auth_datas WHERE DataId='.$dataSetId.' OR DatagroupId='.$dataSetId.'');
+  	  $sth->execute();
+  	  while (my $row = $sth->fetchrow_hashref()) {
+  	    push(@data_capabilities,{
+  	      Capability      => $dataset_capabilities->{$dataSetId}->{'Capability'     },
+  	      CapabilityValue => $dataset_capabilities->{$dataSetId}->{'CapabilityValue'},
+  	      Repository      => $row->{'Repository'    },
+  	      DatabaseName    => $row->{'DatabaseName'  },
+  	      TableName       => $row->{'TableName'     },
+  	      RowWhereClause  => $row->{'RowWhereClause'},
+  	      ColumnList      => $row->{'ColumnList'    }
+  	    });
+  	  }
+  	  $sth->finish();
+  	}
   }
 
-  # Sort components to group Repository/DatabaseName/TableName rows together.
+  #-----Sort dataset component capabilities to group Repository/DatabaseName/TableName rows together.------------------
   @data_capabilities = sort {
     $a->{'Repository'  } cmp $b->{'Repository'  } ||
     $a->{'DatabaseName'} cmp $b->{'DatabaseName'} ||
     $a->{'TableName'   } cmp $b->{'TableName'   }
   } @data_capabilities;
 
-  # Define views.
-  (my $user_prefix = $user_email) =~ s/[^A-Za-z0-9_]/_/g;
-  if ((scalar @data_capabilities) > 0) {
-	  my $last_cc = $data_capabilities[0];
-	  my @tbl_sql = ();
-	  foreach my $cc (@data_capabilities) {
-	    if (($cc->{'Repository'  } ne $last_cc->{'Repository'  }) or
-	        ($cc->{'DatabaseName'} ne $last_cc->{'DatabaseName'}) or
-	        ($cc->{'TableName'   } ne $last_cc->{'TableName'   })    ) {
-	      my $sql = sprintf('CREATE VIEW %s_%s AS %s;',$user_prefix,$last_cc->{'TableName'},join " UNION ",@tbl_sql);
-	      $self->logger->info($sql);
-	      # TODO: Issue create view to DB.
-	      @tbl_sql = ();
-	      $last_cc = $cc;
-	    }
-	    my $row_sql = sprintf("SELECT %s FROM %s",$last_cc->{'ColumnList'},$last_cc->{'TableName'});
-	    if ($last_cc->{'RowWhereClause'}) {
-	      $row_sql .= sprintf(" WHERE %s",$last_cc->{'RowWhereClause'});
-	    }
-	    push(@tbl_sql,sprintf("(%s)",$row_sql));
-	  }
-      my $sql = sprintf('CREATE VIEW %s_%s AS %s;',$user_prefix,$last_cc->{'TableName'},join " UNION ",@tbl_sql);
-      $self->logger->info($sql);
-      # TODO: Issue create view to DB.
+  #-----Define authorized views for this user to each Repository/DatabaseName/Tablename.-------------------------------
+  my @rd_views = ();
+  {
+    if ((scalar @data_capabilities) > 0) {
+  	  my $last_cc = $data_capabilities[0];
+  	  my @tbl_sql = ();
+  	  foreach my $cc (@data_capabilities) {
+  	    if (($cc->{'Repository'  } ne $last_cc->{'Repository'  }) or
+  	        ($cc->{'DatabaseName'} ne $last_cc->{'DatabaseName'}) or
+  	        ($cc->{'TableName'   } ne $last_cc->{'TableName'   })    ) {
+  	      push(@rd_views,{
+  	        'Repository'   => $last_cc->{'Repository'  },
+  	        'DatabaseName' => $last_cc->{'DatabaseName'},
+  	        'TableName'    => $last_cc->{'TableName'   },
+  	        'ViewDef'      => join " UNION ",@tbl_sql
+  	      });
+  	      @tbl_sql = ();
+  	      $last_cc = $cc;
+  	    }
+  	    my $row_sql = sprintf("SELECT %s FROM %s",$cc->{'ColumnList'},$cc->{'TableName'});
+  	    if ($cc->{'RowWhereClause'}) {
+  	      $row_sql .= sprintf(" WHERE %s",$cc->{'RowWhereClause'});
+  	    }
+  	    push(@tbl_sql,sprintf("(%s)",$row_sql));
+  	  }
+      push(@rd_views,{
+        'Repository'   => $last_cc->{'Repository'  },
+        'DatabaseName' => $last_cc->{'DatabaseName'},
+        'TableName'    => $last_cc->{'TableName'   },
+        'ViewDef'      => join " UNION ",@tbl_sql
+      });
+    }
   }
-    
+  
+  #-----Drop all of the current views for this user.-------------------------------------------------------------------
+  (my $user_prefix = $user_email) =~ s/[^A-Za-z0-9_]/_/g;
+  {
+    my @database_names = ('kddart_v2_3_2'); # TODO: get complete list of db names.
+    foreach my $dbname (@database_names) {
+      my $sql = sprintf('SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE LIKE "VIEW"');
+         $sql .= sprintf(' AND TABLE_SCHEMA="%s"',$dbname);
+         $sql .= sprintf(' AND TABLE_NAME LIKE "%s_%%"',$user_prefix);
+      my $sth = $dbh->prepare($sql);
+      $sth->execute();
+      while (my $row = $sth->fetchrow_hashref()) {
+        execlog_sql($self->logger,$dbh,sprintf('DROP VIEW %s',$row->{'TABLE_NAME'}));
+      }
+      $sth->finish();
+    }
+  }
+  if ((scalar @rd_views) > 0) {  
+    foreach my $v (@rd_views) {
+      my $sql = sprintf('CREATE DEFINER=CURRENT_USER VIEW %s_%s AS %s',$user_prefix,$v->{'TableName'},$v->{'ViewDef'});
+      $self->logger->info($sql);
+      given ($v->{'Repository'}) {
+      when ('127.0.0.1/mysql') { execlog_sql($self->logger,$dbh,$sql); }
+      default                  {                                       }
+      }
+    }
+  }
+
   $self->logger->info("Would finish creating user session . . .");
   # TODO: Finish create session info a la oauth2google below.
   	  	

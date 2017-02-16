@@ -61,7 +61,7 @@ our @EXPORT   = qw($DTD_PATH $RPOSTGRES_UP_FILE $GIS_BUFFER_DISTANCE
                    $SOLR_URL $POINT2POLYGON_BUFFER4SITE $POINT2POLYGON_BUFFER4TRIAL
                    $MAX_RECURSIVE_ANCESTOR_LEVEL $MAX_RECURSIVE_DESCENDANT_LEVEL
                    trim ltrim rtrim read_uname_pass connect_kdb_read
-                   execute_sql read_cell permission_phrase
+                   execute_sql execlog_sql read_cell permission_phrase
                    read_cookie arrayref2csvfile arrayref2xml reconstruct_server_url
                    read_dispatch_table dispatch_table2xml merge_xml
                    connect_kdb_write record_existence read_cell_value
@@ -395,6 +395,14 @@ sub execute_sql  {
   $sth->finish();
 
   return ($err, $err_str);
+}
+
+sub execlog_sql {
+  my $logger = shift;
+  my ($err, $err_str) = execute_sql(@_);
+  if ($err) {
+    $logger->error($err_str);
+  }
 }
 
 sub read_cell {
