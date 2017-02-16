@@ -65,48 +65,7 @@ Login
   vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
   Add Authorization tables.
 
-  DROP TABLE IF EXISTS auth_users;
-  CREATE TABLE auth_users (
-    UserId                    INT          PRIMARY KEY AUTO_INCREMENT,
-    UserName                  VARCHAR(255) UNIQUE  KEY,
-    FullName                  VARCHAR(63),
-    Email                     VARCHAR(255)
-  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
-
-  DROP TABLE IF EXISTS auth_groups;  
-  CREATE TABLE auth_groups (
-    GroupId                   INT          PRIMARY KEY AUTO_INCREMENT,
-    GroupName                 VARCHAR(255) UNIQUE  KEY
-  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci' AUTO_INCREMENT=1000000001;
   
-  
-  DROP TABLE IF EXISTS auth_datasets;
-  CREATE TABLE auth_datasets (
-    DatasetId                 INT          PRIMARY KEY AUTO_INCREMENT,
-    DatasetName               VARCHAR(255) UNIQUE  KEY
-  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
-  
-  DROP TABLE IF EXISTS auth_group_users;
-  CREATE TABLE auth_group_users (
-    GroupId                   INT,
-    UserId                    INT,
-    UNIQUE INDEX idx_GroupId_UserId (GroupId,UserId),
-           INDEX idx_GroupId        (GroupId),
-           INDEX idx_UserId         (UserId)
-  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
-  
-  DROP TABLE IF EXISTS auth_dataset_userset;
-  CREATE TABLE auth_dataset_userset (
-    DatasetId                 INT,
-    Capability                VARCHAR(15),
-    UserGroupId               INT,
-    UNIQUE INDEX idx_DatasetId_Capability (DatasetId,Capability),
-           INDEX idx_DatasetId            (DatasetId),
-           INDEX idx_UserGroupId          (UserGroupId)
-  ) CHARACTER SET 'utf8' COLLATE 'utf8_general_ci';
-  
-
-
   SELECT d.DatasetId,d.DatasetName,du.Capability,g.GroupName,u.FullName
    FROM       auth_users           u
    INNER JOIN auth_group_users     gu ON (gu.UserId      =  u.UserId)
@@ -114,6 +73,14 @@ Login
    LEFT  JOIN auth_groups          g  ON (g.GroupId      =  du.UserGroupId)
    INNER JOIN auth_datasets        d  ON (d.DatasetId    =  du.DatasetId)
    WHERE (u.UserId=1);
+SELECT du.DataSetId,du.Capability
+ FROM       auth_users              u
+ INNER JOIN auth_usergroup_users    gu ON (gu.UserId      =   u.UserId                )
+ INNER JOIN auth_dataset_userset    du ON (du.UserSetId   IN (u.UserId,gu.UsergroupId))
+ WHERE (u.UserId=1);
+
+ LEFT  JOIN auth_datagroups         dg ON (dg.DatagroupId =   du.DataSetId            )
+ LEFT  JOIN auth_usergroups         ug ON (ug.UsergroupId =   du.UserSetId            )
 
 
 

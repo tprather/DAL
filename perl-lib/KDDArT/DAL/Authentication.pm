@@ -44,7 +44,9 @@ use Mozilla::CA;
 use LWP::UserAgent;
 use HTTP::Request::Common qw(POST GET);
 use JSON qw(decode_json);
+
 use URI::Escape;
+use Storable qw(dclone);
 
 BEGIN {
 
@@ -631,6 +633,17 @@ sub switch_extra_data_runmode {
   return $data_for_postrun_href;
 }
 
+sub capability_value {
+  my $s = "".$_[0];
+  if ($s eq "EDIT") {
+    return 2;
+  }
+  if ($s eq "READ") {
+    return 1;
+  }
+  return 0;
+}
+
 sub oauth2_globus_runmode {
   my $self  = shift;
   my $query = $self->query();
@@ -728,35 +741,89 @@ sub oauth2_globus_runmode {
   	$user_id = read_cell_value($dbh,'auth_users','UserId','UserName',$user_email);
   }
   
-  # Temporary code to create/test initial groups for tprather.
-  if ($user_email eq 'tprather@umn.edu') {
-    execute_sql($dbh,"INSERT IGNORE INTO auth_groups          SET GroupName='Test Group 1'");
-    execute_sql($dbh,"INSERT IGNORE INTO auth_group_users     SET GroupId=1000000001,UserId=1");
-    execute_sql($dbh,"INSERT IGNORE INTO auth_datasets        SET DatasetName='Test Dataset 1'");
-    execute_sql($dbh,"INSERT IGNORE INTO auth_dataset_userset SET DatasetId=1,Capability='READ',UserGroupId=1000000001");
-    execute_sql($dbh,"INSERT IGNORE INTO auth_dataset_userset SET DatasetId=1,Capability='EDIT',UserGroupId=1");
+  # Load MAX dataset capabilities.
+  my $dataset_capabilities = {};
+  {
+	  $self->logger->info(sprintf("Looking up %s's dataset capabilities . . .",$user_email));
+	  my $sql  = "SELECT du.DataSetId,du.Capability";
+	     $sql .= " FROM       auth_users              u";
+	     $sql .= " INNER JOIN auth_usergroup_users    gu ON (gu.UserId      =   u.UserId                )";
+	     $sql .= " INNER JOIN auth_dataset_userset    du ON (du.UserSetId   IN (u.UserId,gu.UsergroupId))";
+	     $sql .= " WHERE (u.UserId=?)";
+	  my $sth = $dbh->prepare($sql);
+	  $sth->execute($user_id);
+	  while (my $row = $sth->fetchrow_hashref()) {
+	    my $c = capability_value($row->{'Capability'});
+	    my $a = $dataset_capabilities->{$row->{'DataSetId'}};
+	    if ($a) {
+	      if ($c > $a->{'CapabilityValue'}) {
+	        $a->{'Capability'     } = $row->{'Capability'};
+	        $a->{'CapabilityValue'} = $c;
+	      } 
+	    } else {
+	      $dataset_capabilities->{$row->{'DataSetId'}} = { 
+	        Capability      => $row->{'Capability' },
+	        CapabilityValue => $c 
+	      };
+	    }
+	  }
+	  $sth->finish();
   }
-  
-  $self->logger->info("Looking up user's dataset capabilities . . .");
-  my $sql  = "SELECT d.DatasetId,d.DatasetName,du.Capability,g.GroupName,u.FullName";
-     $sql .= " FROM       auth_users           u";
-     $sql .= " INNER JOIN auth_group_users     gu ON (gu.UserId      =   u.UserId            )";
-     $sql .= " INNER JOIN auth_dataset_userset du ON (du.UserGroupId IN (u.UserId,gu.GroupId))";
-     $sql .= " LEFT  JOIN auth_groups          g  ON (g.GroupId      =   du.UserGroupId      )";
-     $sql .= " INNER JOIN auth_datasets        d  ON (d.DatasetId    =   du.DatasetId        )";
-     $sql .= " WHERE (u.UserId=?)";
-  my $sth = $dbh->prepare($sql);
-  $sth->execute($user_id);
-  while (my $row = $sth->fetchrow_hashref() ) {
-    my $dataset_id    = $row->{'DatasetId'};
-    my $dataset_name  = $row->{'DatasetName'};
-    my $capability    = $row->{'Capability'};
-    my $group_name    = $row->{'GroupName'};
-    my $user_fullname = $row->{'FullName'};
-    $self->logger->info("Dataset Capability = ".$dataset_name." / ".$capability." (".$group_name.",".$user_fullname.")");
-  }
-  $sth->finish();
 
+  # Note dataset components.
+  my @data_capabilities = ();
+  {
+      foreach my $dataSetId (keys $dataset_capabilities) {
+	    my $sth = $dbh->prepare('SELECT * FROM auth_datas WHERE DataId='.$dataSetId.' OR DatagroupId='.$dataSetId.'');
+	    $sth->execute();
+	    while (my $row = $sth->fetchrow_hashref()) {
+	      push(@data_capabilities,{
+	        Capability      => $dataset_capabilities->{$dataSetId}->{'Capability'     },
+	        CapabilityValue => $dataset_capabilities->{$dataSetId}->{'CapabilityValue'},
+	        Repository      => $row->{'Repository'    },
+	        DatabaseName    => $row->{'DatabaseName'  },
+	        TableName       => $row->{'TableName'     },
+	        RowWhereClause  => $row->{'RowWhereClause'},
+	        ColumnList      => $row->{'ColumnList'    }
+	      });
+	    }
+	    $sth->finish();
+	  }
+  }
+
+  # Sort components to group Repository/DatabaseName/TableName rows together.
+  @data_capabilities = sort {
+    $a->{'Repository'  } cmp $b->{'Repository'  } ||
+    $a->{'DatabaseName'} cmp $b->{'DatabaseName'} ||
+    $a->{'TableName'   } cmp $b->{'TableName'   }
+  } @data_capabilities;
+
+  # Define views.
+  (my $user_prefix = $user_email) =~ s/[^A-Za-z0-9_]/_/g;
+  if ((scalar @data_capabilities) > 0) {
+	  my $last_cc = $data_capabilities[0];
+	  my @tbl_sql = ();
+	  foreach my $cc (@data_capabilities) {
+	    if (($cc->{'Repository'  } ne $last_cc->{'Repository'  }) or
+	        ($cc->{'DatabaseName'} ne $last_cc->{'DatabaseName'}) or
+	        ($cc->{'TableName'   } ne $last_cc->{'TableName'   })    ) {
+	      my $sql = sprintf('CREATE VIEW %s_%s AS %s;',$user_prefix,$last_cc->{'TableName'},join " UNION ",@tbl_sql);
+	      $self->logger->info($sql);
+	      # TODO: Issue create view to DB.
+	      @tbl_sql = ();
+	      $last_cc = $cc;
+	    }
+	    my $row_sql = sprintf("SELECT %s FROM %s",$last_cc->{'ColumnList'},$last_cc->{'TableName'});
+	    if ($last_cc->{'RowWhereClause'}) {
+	      $row_sql .= sprintf(" WHERE %s",$last_cc->{'RowWhereClause'});
+	    }
+	    push(@tbl_sql,sprintf("(%s)",$row_sql));
+	  }
+      my $sql = sprintf('CREATE VIEW %s_%s AS %s;',$user_prefix,$last_cc->{'TableName'},join " UNION ",@tbl_sql);
+      $self->logger->info($sql);
+      # TODO: Issue create view to DB.
+  }
+    
   $self->logger->info("Would finish creating user session . . .");
   # TODO: Finish create session info a la oauth2google below.
   	  	
