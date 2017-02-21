@@ -831,37 +831,143 @@ sub oauth2_globus_runmode {
       });
     }
   }
-  
+=pod  
   #-----Drop all of the current views for this user.-------------------------------------------------------------------
+  my @rd_names = ({'Repository' => '127.0.0.1/mysql', 'DatabaseName' => 'kddart_v2_3_2'}); # TODO: get complete list of repository/database names.
   (my $user_prefix = $user_email) =~ s/[^A-Za-z0-9_]/_/g;
   {
-    my @database_names = ('kddart_v2_3_2'); # TODO: get complete list of db names.
-    foreach my $dbname (@database_names) {
-      my $sql = sprintf('SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE LIKE "VIEW"');
-         $sql .= sprintf(' AND TABLE_SCHEMA="%s"',$dbname);
-         $sql .= sprintf(' AND TABLE_NAME LIKE "%s_%%"',$user_prefix);
+    foreach my $rdname (@rd_names) {
+      given ($rdname->{'Repository'}) {
+        when ('127.0.0.1/mysql') {
+          my $sql = sprintf('SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE LIKE "VIEW"');
+             $sql .= sprintf(' AND TABLE_SCHEMA="%s"',$rdname->{'DatabaseName'});
+             $sql .= sprintf(' AND TABLE_NAME LIKE "%s_%%"',$user_prefix);
+          my $sth = $dbh->prepare($sql);
+          $sth->execute();
+          while (my $row = $sth->fetchrow_hashref()) {
+            execlog_sql($self->logger,$dbh,sprintf('DROP VIEW %s',$row->{'TABLE_NAME'}));
+          }
+          $sth->finish();
+        }
+        default {
+        }
+      }
+    }
+  }
+  
+  #-----Define views for this user for every table in every database.--------------------------------------------------
+  {
+    foreach my $rdname (@rd_names) {
+      given ($rdname->{'Repository'}) {
+        when ('127.0.0.1/mysql') {
+          my $sql = sprintf('SELECT TABLE_NAME FROM information_schema.tables WHERE TABLE_TYPE LIKE "BASE TABLE"');
+             $sql .= sprintf(' AND TABLE_SCHEMA="%s"',$rdname->{'DatabaseName'});
+          my $sth = $dbh->prepare($sql);
+          $sth->execute();
+          while (my $row = $sth->fetchrow_hashref()) {
+            my $viewdef = sprintf('SELECT * FROM %s WHERE FALSE',$row->{'TABLE_NAME'});
+            my ($v)     = grep { ($_->{'Repository'  } eq $rdname->{'Repository'}  ) and 
+                                 ($_->{'DatabaseName'} eq $rdname->{'DatabaseName'}) and
+                                 ($_->{'TableName'   } eq $row   ->{'TABLE_NAME'  })    } @rd_views;
+            if ($v) {
+              $viewdef = $v->{'ViewDef'};
+            }
+            execlog_sql($self->logger,$dbh,sprintf('CREATE DEFINER=CURRENT_USER VIEW %s_%s AS %s',$user_prefix,$row->{'TABLE_NAME'},$viewdef));
+          }
+          $sth->finish();
+        }
+        default {
+        }
+      }
+    }
+  }
+=cut
+  
+  #-----For now, make sure there is a systemuser entry for this user and create the session info.----------------------
+  {
+    my $username = $user_email;
+    my $user_id  = read_cell_value($dbh,'systemuser','UserId','UserName',$username);
+    if (length($user_id) == 0) {
+      # TODO: Create organization entry for "Globus" if missing.
+      # TODO: Create contact entry for user. (using organizationId value for Globus)
+      # TODO: Create systemuser entry for user. (using ContactId value for created contact)
+      my $sql = 'INSERT INTO systemuser SET UserName=?, UserPassword="", PasswordSalt="", ContactId=0, LastLoginDateTime="0000-00-00 00:00:00", UserPreference="", UserType="human"';
       my $sth = $dbh->prepare($sql);
-      $sth->execute();
-      while (my $row = $sth->fetchrow_hashref()) {
-        execlog_sql($self->logger,$dbh,sprintf('DROP VIEW %s',$row->{'TABLE_NAME'}));
+      $sth->execute($username);
+      if ($dbh->err()) {
+        $self->logger->error('Error creating new user.');
+        $data_for_postrun_href->{'Error'} = 1;
+        $data_for_postrun_href->{'Data' } = {'Error' => [{'Message' => 'Unexpected error.'}]};
+        return $data_for_postrun_href;
       }
       $sth->finish();
+      $user_id = read_cell_value($dbh,'systemuser','UserId','UserName',$username);
     }
-  }
-  if ((scalar @rd_views) > 0) {  
-    foreach my $v (@rd_views) {
-      my $sql = sprintf('CREATE DEFINER=CURRENT_USER VIEW %s_%s AS %s',$user_prefix,$v->{'TableName'},$v->{'ViewDef'});
-      $self->logger->info($sql);
-      given ($v->{'Repository'}) {
-      when ('127.0.0.1/mysql') { execlog_sql($self->logger,$dbh,$sql); }
-      default                  {                                       }
-      }
-    }
-  }
+    
+    my $start_time        = [gettimeofday()];
+    my $cookie_only_rand  = makerandom(Size => 128, Strength => 0);
+    my $f_rand_elapsed    = tv_interval($start_time);
+    my $session_id        = $self->session->id();
+    my $now               = time();
+    $start_time           = [gettimeofday()];
+    my $write_token_rand  = makerandom(Size => 128, Strength => 0);
+    my $s_rand_elapsed    = tv_interval($start_time);
+    my $write_token       = hmac_sha1_hex("$cookie_only_rand", "$write_token_rand");
+    my $group_id          = -99;  # Not set at this stage
+    my $gadmin_status     = -99;  # But needs protection from modification from here on
+    my $extra_data_status = 0;    # By default, DAL does not return SystemGroup and Operation tags.  However, this can be switched on.
+    my $rememberme        = 'no';
 
-  $self->logger->info("Would finish creating user session . . .");
-  # TODO: Finish create session info a la oauth2google below.
-  	  	
+    my $hash_data         = "$username"."$session_id"."$rememberme"."$write_token"."$group_id"."$user_id"."$gadmin_status";
+    my $session_checksum  = hmac_sha1_hex($hash_data, "$cookie_only_rand");
+    
+    $self->authen->store->save(
+      'USERNAME'       => $username,
+      'LOGIN_ATTEMPTS' => 0,
+      'LAST_LOGIN'     => $now,
+      'LAST_ACCESS'    => $now,
+      'REMEMBER_ME'    => $rememberme,
+      'CHECKSUM'       => $session_checksum,
+      'WRITE_TOKEN'    => $write_token,
+      'GROUP_ID'       => $group_id,
+      'USER_ID'        => $user_id,
+      'GADMIN_STATUS'  => $gadmin_status,
+      'EXTRA_DATA'     => $extra_data_status,
+    );
+    
+    my $cookie            = $query->cookie(
+      -name    => 'KDDArT_RANDOM_NUMBER',
+      -value   => "$cookie_only_rand",
+      -expires => '+10y',
+    );
+
+    my $cur_dt            = DateTime::Format::MySQL->format_datetime(DateTime->now(time_zone => $TIMEZONE));
+    my $sql               = 'UPDATE systemuser SET LastLoginDateTime=? WHERE UserId=?';
+    my $sth               = $dbh->prepare($sql);
+    $sth->execute($cur_dt, $user_id);
+    $sth->finish();
+
+    log_activity($dbh,$user_id,0,'LOGIN');
+
+    $dbh->disconnect();
+
+    $self->header_add(-cookie => [$cookie]);
+    $self->session_cookie();
+
+    $self->logger->debug("$user_email");
+    $self->logger->debug("random number: $cookie_only_rand");
+    $self->logger->debug("checksum: $session_checksum");
+
+    my $write_token_aref  = [{'Value'  => $write_token                         }];
+    my $user_info_aref    = [{'UserId' => $user_id    , 'UserName' => $username}];
+
+    $data_for_postrun_href->{'Data'}   = {'WriteToken' => $write_token_aref,
+                                          'User'       => $user_info_aref
+                                         };
+    $data_for_postrun_href->{'ExtraData'} = 0;
+
+    return $data_for_postrun_href;
+  }
 
   my $r = {};
   $r->{'Error'     } = 0;

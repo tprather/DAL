@@ -64,24 +64,7 @@ Login
   
   vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
   Add Authorization tables.
-
-  
-  SELECT d.DatasetId,d.DatasetName,du.Capability,g.GroupName,u.FullName
-   FROM       auth_users           u
-   INNER JOIN auth_group_users     gu ON (gu.UserId      =  u.UserId)
-   INNER JOIN auth_dataset_userset du ON (du.UserGroupId IN (u.UserId,gu.GroupId))
-   LEFT  JOIN auth_groups          g  ON (g.GroupId      =  du.UserGroupId)
-   INNER JOIN auth_datasets        d  ON (d.DatasetId    =  du.DatasetId)
-   WHERE (u.UserId=1);
-SELECT du.DataSetId,du.Capability
- FROM       auth_users              u
- INNER JOIN auth_usergroup_users    gu ON (gu.UserId      =   u.UserId                )
- INNER JOIN auth_dataset_userset    du ON (du.UserSetId   IN (u.UserId,gu.UsergroupId))
- WHERE (u.UserId=1);
-
- LEFT  JOIN auth_datagroups         dg ON (dg.DatagroupId =   du.DataSetId            )
- LEFT  JOIN auth_usergroups         ug ON (ug.UsergroupId =   du.UserSetId            )
-
+    other/auth_init.sql
 
 
 
@@ -155,9 +138,140 @@ SELECT du.DataSetId,du.Capability
   /usr/local/bin/cpanm LWP::Protocol::https
   /usr/local/bin/cpanm URI::Escape;
 
+??? Debugging perl.
+
+>>>> Attempts with Eclipse on VM.
+
+  yum install java-1.8.0-openjdk
+  yum install xauth xorg-x11-fonts-base xorg-x11-fonts-misc xorg-x11-font-utils xorg-x11-fonts-Type1 libXtst
+
+  yum install gtk3
+  libswt-pi-gtk ???
+  yum install eclipse-swt
+
+  - Download 64-bit Eclipse from eclipse.org and un-pack to /usr/share/eclipse
+  
+  - 
+
+>>>> Attempts with Eclipse EPIC remote debugging.
+
+  - Edit /etc/httpd/conf/httpd.conf
+  
+      - and add
+      
+          PerlSwitches -I/var/www/perl-lib -I/usr/share/perl5
+          
+          PerlModule Apache2::Reload
+          PerlInitHandler Apache2::Reload
+          PerlSetVar ReloadAll Off
+          PerlSetVar ReloadModules "KDDArT::*"
+          
+          <IfDefine PERLDB>
+          
+              PerlSetEnv PERLDB_OPTS "RemotePort=128.101.135.238:5000 DumpReused ReadLine=0 PrintRet=0"
+              PerlSetEnv PERL5DB "BEGIN { $DB::CreateTTY=0; chdir('/var/www/perl-lib'); system('perl -d -I/var/www/perl-lib KDDArT/DAL/ModIndex.pm'); }" 
+             
+              <Perl>
+                use Apache::DB ();
+                Apache::DB->init;
+              </Perl>
+            
+              <Location />
+                PerlFixupHandler Apache::DB
+              </Location>
+            
+          </IfDefine>
+
+  - Add to /etc/sysconfig/httpd
+
+      - and add to OPTIONS definition:
+      
+          -X -DPERLDB
+          
+      
+  - Restart apache.
+  
+      apachectl start
+
+        
+
+
+     PERLDB_OPTS="RemotePort=128.101.135.238:5000 DumpReused ReadLine=0 PrintRet=0"
+
+  ?? Need .project file at project root on Apache side?
+  
+
+>>>> Attempts with ptkdb on Apache side.
+
+   yum install xorg-x11-xauth xterm
+
+   yum install tk
+   yum install perl-Tk
+   yum install cpan
+   yum install xorg-x11-fonts-Type1
+   
+   cpan Tk
+   cpan Apache::DB
+   cpan Devel::ptkdb
+   
+   vi /etc/httpd/conf.d/perl.conf
+    
+     - Add near top.
+
+        <IfDefine PERLDB>
+        
+          <Perl>
+            use Apache::DB ();
+            Apache::DB->init;
+          </Perl>
+        
+          <Location />
+            PerlFixupHandler Apache::DB
+          </Location>
+        
+        </IfDefine>
 
 
 
+   vi /usr/share/perl5/DB.pm
+   
+     - And put at the top.
+        
+        require 'Devel/ptkdb.pm';
+        exit 0;
+   
+   export PERL5LIB=-I/var/www/perl-lib
+    
+   sudo -u apache httpd -X -D PERLDB
+   
+   ==> start httpd with "httpd -X -D PERLDB ..." for non-forking mode with debugger activated.
+   
+   
+   - use putty with X11 forwarding to connect to 10.32.16.168
+   
+     sudo cp .Xauthority /usr/share/httpd
+     sudo chown apache:apache /usr/share/httpd/.Xauthority  
+
+     sudo vi /etc/sysconfig/httpd
+      
+       - and add line (change # of display if echo $DISPLAY shows differently)
+       
+       XAUTHORITY=/usr/share/httpd/.Xauthority
+       DISPLAY=localhost:10.0
+   
+     sudo vi /etc/httpd/conf/httpd.conf
+
+       - update PerlSwitches to include -d:ptkdb
+            
+       PerlSwitches -d:ptkdb -I/var/www/perl-lib
+
+     sudo vi /etc/httpd/conf.d/http-kddart.example.com.conf
+     
+       - update PerlSwitches as above
+       
+
+     sudo service httpd restart
+     
   ??? curl -L http://cpanmin.us | perl - --sudo Dancer2
   
   
