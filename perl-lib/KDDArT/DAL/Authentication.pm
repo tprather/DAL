@@ -977,8 +977,156 @@ sub oauth2_globus_runmode {
 }
 
 sub oauth2_google_runmode {
+#This Google OAuth function actually uses Globus.  This is a hack to see if 
+#Globus OAuth can be made to work with KDManage in its current state.  
+#dgustaf - May 1, 2017
+  my $self  = shift;
+  my $query = $self->query();
+  my $data_for_postrun_href = {};
+  my $access_token_code = $query->param('access_token');
+  my $redirect_uri = $query->param('redirect_uri');
+  my $local_oauth2_client_id = $OAUTH2_CLIENT_ID->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_secret    = $OAUTH2_CLIENT_SECRET->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_site      = $OAUTH2_SITE->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_auth_path = $OAUTH2_AUTHORIZE_PATH->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_scope     = $OAUTH2_SCOPE->{$ENV{DOCUMENT_ROOT}};
+  my $local_oauth2_acc_token_url = 
+    $OAUTH2_ACCESS_TOKEN_URL->{$ENV{DOCUMENT_ROOT}};
+  my $oauth2_client = Net::OAuth2::Client->new(
+    $local_oauth2_client_id,   # client id or Facebook Application ID
+    $local_oauth2_secret, # client secret
+    site             => $local_oauth2_site,
+    authorize_path   => $local_oauth2_auth_path,
+    scope            => $local_oauth2_scope,
+    access_token_url => $local_oauth2_acc_token_url
+  )->web_server(redirect_uri => $redirect_uri);
+  my $access_token = Net::OAuth2::AccessToken->new(
+    client => $oauth2_client, access_token => $access_token_code
+  );
+  my $response = $access_token->get(
+    'https://www.googleapis.com/oauth2/v2/userinfo'
+  );
+  if ($response->is_success) {
+    my $user_info_href = eval{decode_json($response->decoded_content);};
+    if ($user_info_href) {
+      if ($user_info_href->{'email'}) {
+        my $user_email  = $user_info_href->{'email'};
+        my $first_name  = $user_info_href->{'given_name'};
+        my ($username, $domain) = split('@', $user_email);
+        my $dbh_write = connect_kdb_write();
+        my $user_id = read_cell_value(
+          $dbh_write, 'systemuser', 'UserId', 'UserName', $username
+        );
+        if (length("$user_id") == 0) {
+          my $err_msg = "UserName ($username): unknown.";
+          $data_for_postrun_href->{'Error'} = 1;
+          $data_for_postrun_href->{'Data'} = 
+            {'Error' => [{'Message' => $err_msg}]};
+          return $data_for_postrun_href;
+        }
+        my $start_time = [gettimeofday()];
+        my $cookie_only_rand = makerandom(Size => 128, Strength => 0);
+        my $f_rand_elapsed = tv_interval($start_time);
+        $self->logger->debug("First random number elapsed: $f_rand_elapsed");
+        my $session_id = $self->session->id();
+        my $now = time();
+        $start_time = [gettimeofday()];
+        my $write_token_rand = makerandom(Size => 128, Strength => 0);
+        my $s_rand_elapsed = tv_interval($start_time);
+        $self->logger->debug("Second random number elapsed: $s_rand_elapsed");
+        my $write_token = hmac_sha1_hex(
+          "$cookie_only_rand", "$write_token_rand"
+        );
+        my $group_id          = -99;  # Not set at this stage
+        my $gadmin_status     = -99;  # But needs protection from modification from here on
+        my $extra_data_status = 0;    # By default, DAL does not return SystemGroup and Operation tags.
+                                      # However, this can be switched on.
+        my $rememberme = 'no';
+        my $hash_data = '';
+        $hash_data   .= "$username";
+        $hash_data   .= "$session_id";
+        $hash_data   .= "$rememberme";
+        $hash_data   .= "$write_token";
+        $hash_data   .= "$group_id";
+        $hash_data   .= "$user_id";
+        $hash_data   .= "$gadmin_status";
+        my $session_checksum = hmac_sha1_hex($hash_data, "$cookie_only_rand");
+        $self->authen->store->save(
+          'USERNAME'       => $username,
+          'LOGIN_ATTEMPTS' => 0,
+          'LAST_LOGIN'     => $now,
+          'LAST_ACCESS'    => $now,
+          'REMEMBER_ME'    => $rememberme,
+          'CHECKSUM'       => $session_checksum,
+          'WRITE_TOKEN'    => $write_token,
+          'GROUP_ID'       => $group_id,
+          'USER_ID'        => $user_id,
+          'GADMIN_STATUS'  => $gadmin_status,
+          'EXTRA_DATA'     => $extra_data_status,
+        );
+        my $cookie = $query->cookie(
+          -name        => 'KDDArT_RANDOM_NUMBER',
+          -value       => "$cookie_only_rand",
+          -expires     => '+10y',
+        );
+        my $cur_dt = DateTime->now(time_zone => $TIMEZONE);
+        $cur_dt = DateTime::Format::MySQL->format_datetime($cur_dt);
+        my $sql = 'UPDATE systemuser SET ';
+        $sql   .= 'LastLoginDateTime=? ';
+        $sql   .= 'WHERE UserId=?';
+        my $sth = $dbh_write->prepare($sql);
+        $sth->execute($cur_dt, $user_id);
+        $sth->finish();
+        log_activity($dbh_write, $user_id, 0, 'LOGIN');
+        $dbh_write->disconnect();
+        $self->header_add(-cookie => [$cookie]);
+        $self->session_cookie();
+        $self->logger->debug("$username");
+        $self->logger->debug("random number: $cookie_only_rand");
+        $self->logger->debug("checksum: $session_checksum");
+        my $write_token_aref = [{'Value' => $write_token}];
+        my $user_info_aref   = 
+          [{'UserId' => $user_id, 'UserName' => $username}];
+        $data_for_postrun_href->{'Data'} = {
+          'WriteToken' => $write_token_aref,
+          'User'       => $user_info_aref
+        };
+        $data_for_postrun_href->{'ExtraData'} = 0;
+        return $data_for_postrun_href;
+      }
+      else {
+        $self->logger->debug("No email in user info");
+        my $err_msg = "Unexpected Error.";
+        $data_for_postrun_href->{'Error'} = 1;
+        $data_for_postrun_href->{'Data'}  = 
+          {'Error' => [{'Message' => $err_msg}]};
+        return $data_for_postrun_href;
+      }
+    }
+    else {
+      $self->logger->debug("Cannot decode OAuth2 user info content");
+      my $err_msg = "Unexpected Error.";
+      $data_for_postrun_href->{'Error'} = 1;
+      $data_for_postrun_href->{'Data'}  = 
+        {'Error' => [{'Message' => $err_msg}]};
+      return $data_for_postrun_href;
+    }
+  }
+  else {
+    $self->logger->debug("Cannot get OAuth2 user info content");
+    my $err_msg = "Unexpected Error.";
+    $data_for_postrun_href->{'Error'} = 1;
+    $data_for_postrun_href->{'Data'}  = {'Error' => [{'Message' => $err_msg}]};
+    return $data_for_postrun_href;
+  }
+}
 
-=pod oauth2_google_HELP_START
+
+
+=pod
+#This is the oauth function that actually uses Google.
+sub oauth2_google_runmode {
+#=pod oauth2_google_HELP_START
 {
 "OperationName" : "Login to DAL using Google Auth2",
 "Description": "Login to DAL using Google Auth2 from a valid access token.",
@@ -994,8 +1142,7 @@ sub oauth2_google_runmode {
 "HTTPParameter": [{"Required": 1, "Name": "access_token", "Description": "Valid Google OAuth2 access token"}, {"Required": 1, "Name": "redirect_url", "Description": "Google OAuth2 redirect url. This URL must be registered with Google OAuth2 project."}],
 "HTTPReturnedErrorCode": [{"HTTPCode": 420}]
 }
-=cut
-
+#=cut
   my $self  = shift;
   my $query = $self->query();
 
@@ -1168,6 +1315,8 @@ sub oauth2_google_runmode {
     return $data_for_postrun_href;
   }
 }
+=cut
+
 
 sub logger {
 
