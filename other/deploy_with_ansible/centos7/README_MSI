@@ -1,0 +1,73 @@
+Installing KDDart
+
+KDDart is a database / software package designed to help users manage and query biological data sets.  We intend to use KDDart as part of the International Agroinformatics Alliance (IAA) project.
+
+A new CentOS 7 VM named iaa-kddart was created on Nokomis to allow installation of KDDart.  The VM currently has only an internal IP address of 10.32.16.160.  The initial focus has been installing the KDDart Data Access Layer (DAL), which appears to be the core of the KDDart system.  The KDDart DAL software can be obtained from this github repository:
+https://github.com/kddart/DAL
+
+KDDart provides Ansible scripts for installation.  Ansible is a program for system configuration management and alteration.  Ansible scripts are basically lists of commands / changes that will be implemented on a target computer, in order to configure that computer in a particular way.  Running an Ansible script configures the target computer in a particular way (usually doing things like installing software, creating directories or databases, etc.).  Ansible is essentially the same type program as Puppet, though they work in slightly different ways.
+
+To install KDDart DAL, the KDDart documentation recommends using two Linux computers, one as the target computer where the software will be installed, and the other computer as the Ansible master running running the Ansible scripts.  I followed their recommendation and used two computers during the installation (my local desktop as the master running the Ansible scripts, and the iaa-kddart VM as the Ansible target where KDDart was being installed).  I am not certain if it is absolutely necessary to use two computers for deployment (Ansible has the ability to have the same computer serve as both master and target), but I used two computers in this way because the KDDart documentation recommended it, and I was concerned that deviating from the recommendations might cause unforeseen issues.
+
+NOTE: It is possible to use a single computer.  The installation process for a single computer is noted below.
+
+The installation process I used was as follows:
+
+- First, the Ansible master system (my local desktop system), needs to be able to ssh to the target system (the iaa-kddart VM) as root using an ssh key.  To make this possible, an ssh public key needs to be placed on the target system in the root user's ~/.ssh/authorized_keys file.  I placed one of my public keys in that file, and I also then setup an ssh alias on my local desktop to allow for easy connection, by placing this stanza in the ~/.ssh/config file on my local desktop:
+host iaa_kddart_root
+   Proxycommand ssh dgustaf@login.msi.umn.edu nc 10.32.16.160 22
+   User root
+After this has been setup, to test that it is working you can try executing this command: ssh iaa_kddart_root
+This command should allow connection to the target machine as the root user, without requiring a password.
+ 
+- On my local desktop system, I cloned the KDDart DAL software repository using this command:
+git clone https://github.com/kddart/DAL.git
+In the newly checked-out DAL directory, this subdirectory contains Ansible scripts for KDDart installation on a CentOS 7 system, as well as a README file with advice:
+DAL/other/deploy_with_ansible/centos7 
+
+- Ansible needs to be installed on both the local system and the target system.  To install Ansible on a CentOS 7 system, use the command:
+yum install ansible
+
+- On the Ansible master system (the local machine), a host named "kddartserver" needs to be defined in the Ansible hosts file located at /etc/ansible/hosts.  These lines can be added to the bottom of that file: 
+[kddartserver]
+iaa_kddart_root
+
+- From within the /DAL/other/deploy_with_ansible/centos7 directory, it is possible to run the Ansible scripts to setup KDDart on the iaa-kddart VM.  The scripts can be run using this command:
+ansible-playbook  kddart_dal_v2_3_2_server_deployment_centos7_from_github.yml
+While the script is running, it will ask for the IP of the target system, but what it really wants is the ssh target.  I entered iaa_kddart_root for the "IP", and it worked correctly.
+It also prompt the user to choose a password for the MySQL database which will be installed, and for the kddartuser which will be created.  The installer can choose these passwords (it is best to write them down).  If the Ansible script is run more than once, the same passwords should be used.
+
+- Most of the KDDart installation Ansible script works without any problems.  However, I encountered a problem when the script attempts to start the postgres server.  The problem seemed to be related to the way the IP addresses were specified in the file /var/lib/pgsql/9.5/data/pg_hba.conf  I believe the appropriate line should read like:
+host    kddart_gis_enviro_v2_3_2  all           127.0.0.1/24            password
+If another line is present referncing iaa_kddart_root as the IP, that line can be removed.  Similarly, if a line referencing the local IP is present (10.32.16.160), that line can be removed.  The IP should end with the netmask (/24); if that is missing, it can be manually added.  After making these adjustements, the Ansible script can be re-run.
+
+- There was also a problem related to how the Ansible script attempted to disable firewalld.  It appears that firewalld was already disabled on the VM I was using, so this Ansible command always failed.  I just commented out the Ansible commands for disabling and stopping firewalld located in kddart_dal_v2_3_2_server_deployment_centos7.yml, and then re-executed the Ansible script.
+- If the Ansible installation script needs to be run more than once, the user installing may need to manually delete the directory named KDDArT-DAL-...  located in the root user's home directory on the target system.  Otherwise the previous material in that directory can conflict with a new install attempt, and prevent a fresh clone of the DAL github repository.
+
+- After some iteration with the quirks described above, the KDDart installation appeared to succeed, with all of the Ansible tasks reporting success.
+
+The installation process for a single computer works as follows:
+- Change user to root.
+  sudo su
+- Install epel-release, ansible, and git.
+  yum -y install epel-release ansible git
+Get the DAL source and make a few edits to the ansible script.
+  cd /root
+  git clone https://github.com/kddart/DAL.git KDDArT-DAL-v2.3.2
+  cd KDDArT-DAL-v2.3.2/other/deploy_with_ansible/centos7
+  vi kddart_dal_v2_3_2_server_deployment_centos7_from_github.yml
+  and do the following:
+    - change "hosts: kddartserver" to the 2 lines
+        hosts: localhost
+        connection: local
+    - comment out the git install and execution steps
+    - you can optionally comment out the prompt for the git_tag_name as it won't be used
+
+  vi kddart_dal_v2_3_2_server_deployment_centos7.yml
+  and do the following:
+    - comment out the "Disable firewall" and "Stop firewall" steps.
+
+- Run the ansible script.
+  export PATH=$PATH:/usr/local/bin
+  ansible-playbook kddart_dal_v2_3_2_server_deployment_centos7_from_github.yml
+
